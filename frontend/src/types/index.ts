@@ -184,3 +184,24 @@ export interface ScopeStatus {
   in_scope_assets: number
   out_of_scope_assets: number
 }
+
+export interface FindingStats {
+  total: number
+  by_severity: Record<string, number>
+  by_status: Record<string, number>
+  by_confidence: Record<string, number>
+  by_source: Record<string, number>
+}
+
+export interface DashboardAnalytics {
+  project_id: number
+  stats: ProjectStats
+  findings: FindingStats
+  job_status: Record<string, number>
+  http_status_codes: Record<string, number>
+  top_technologies: Array<{ name: string; count: number }>
+  scope_coverage: Record<string, number>
+  recon_funnel: Array<{ stage: string; count: number }>
+  discovery_timeline: Array<{ date: string; count: number }>
+  tools_by_category: Record<string, number>
+}

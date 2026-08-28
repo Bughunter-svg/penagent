@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { Project, Asset, Host, URLRecord, Finding, Job, JobLog, ToolStatus, AIStatus, PipelineStatus, ScopeStatus } from '@/types'
+import type { Project, Asset, Host, URLRecord, Finding, Job, JobLog, ToolStatus, AIStatus, PipelineStatus, ScopeStatus, DashboardAnalytics } from '@/types'
 
 const api = axios.create({ baseURL: '/api' })
 
@@ -9,6 +9,7 @@ export const projectsApi = {
   create: (data: { name: string; description?: string; targets: string[]; scope_includes: string[]; scope_excludes: string[] }) =>
     api.post('/projects', data).then(r => r.data),
   delete: (id: number) => api.delete(`/projects/${id}`).then(r => r.data),
+  analytics: (id: number): Promise<DashboardAnalytics> => api.get(`/projects/${id}/analytics`).then(r => r.data),
 }
 
 export const scopeApi = {

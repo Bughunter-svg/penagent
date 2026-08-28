@@ -1,12 +1,12 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { projectsApi, aiApi, toolsApi } from '@/services/api'
-import type { Project, AIStatus, ToolStatus } from '@/types'
-import { Globe, Server, Link2, ShieldAlert, Cpu, Activity, ChevronRight, Plus, Target, AlertTriangle } from 'lucide-react'
+import type { Project, AIStatus, ToolStatus, DashboardAnalytics } from '@/types'
+import { Globe, Server, Link2, ShieldAlert, Cpu, Activity, ChevronRight, Plus, Target } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-  PieChart, Pie, Cell, Legend
+  PieChart, Pie, Cell, Legend, AreaChart, Area, RadialBarChart, RadialBar
 } from 'recharts'
 
 const statCards = [
@@ -22,13 +22,17 @@ const SEV_COLORS: Record<string, string> = {
   critical: '#ef4444', high: '#f97316', medium: '#eab308', low: '#3b82f6', info: '#6b7280'
 }
 
+const JOB_COLORS: Record<string, string> = {
+  completed: '#22c55e', running: '#3b82f6', failed: '#ef4444', queued: '#6b7280', cancelled: '#f97316', skipped: '#94a3b8'
+}
+
 const CustomTooltip = ({ active, payload, label }: any) => {
   if (!active || !payload?.length) return null
   return (
     <div className="bg-card border border-border rounded-md px-3 py-2 text-xs shadow-lg">
       <p className="font-medium">{label}</p>
       {payload.map((p: any, i: number) => (
-        <p key={i} style={{ color: p.color }}>{p.name}: {p.value}</p>
+        <p key={i} style={{ color: p.color || p.fill }}>{p.name}: {p.value}</p>
       ))}
     </div>
   )
@@ -36,9 +40,11 @@ const CustomTooltip = ({ active, payload, label }: any) => {
 
 export default function DashboardPage() {
   const [projects, setProjects] = useState<Project[]>([])
+  const [analytics, setAnalytics] = useState<DashboardAnalytics | null>(null)
   const [loading, setLoading] = useState(true)
   const [aiStatus, setAiStatus] = useState<AIStatus | null>(null)
   const [tools, setTools] = useState<ToolStatus[]>([])
+  const [selectedProjectId, setSelectedProjectId] = useState<number | null>(null)
   const navigate = useNavigate()
 
   useEffect(() => {
@@ -49,17 +55,25 @@ export default function DashboardPage() {
     ]).finally(() => setLoading(false))
   }, [])
 
-  const activeProject = projects.find(p => p.status === 'active') || projects[0]
-  const stats = activeProject?.stats
+  useEffect(() => {
+    if (!projects.length) return
+    const active = projects.find(p => p.status === 'active') || projects[0]
+    setSelectedProjectId(active.id)
+  }, [projects])
 
-  // Build chart data from stats
-  const severityData = [
-    { name: 'Critical', value: stats?.high_confidence ?? 0, fill: SEV_COLORS.critical },
-    { name: 'High', value: Math.max(0, (stats?.findings ?? 0) - (stats?.high_confidence ?? 0)), fill: SEV_COLORS.high },
-    { name: 'Medium', value: 0, fill: SEV_COLORS.medium },
-    { name: 'Low', value: 0, fill: SEV_COLORS.low },
-    { name: 'Info', value: 0, fill: SEV_COLORS.info },
-  ].filter(d => d.value > 0)
+  useEffect(() => {
+    if (!selectedProjectId) return
+    projectsApi.analytics(selectedProjectId).then(setAnalytics).catch(() => setAnalytics(null))
+  }, [selectedProjectId])
+
+  const activeProject = projects.find(p => p.id === selectedProjectId) || projects[0]
+  const stats = analytics?.stats ?? activeProject?.stats
+
+  const severityData = Object.entries(analytics?.findings.by_severity ?? {}).map(([name, value]) => ({
+    name: name.charAt(0).toUpperCase() + name.slice(1),
+    value,
+    fill: SEV_COLORS[name] ?? '#6b7280',
+  }))
 
   const assetBreakdown = [
     { name: 'Subdomains', count: stats?.subdomains ?? 0 },
@@ -68,6 +82,32 @@ export default function DashboardPage() {
     { name: 'Params', count: stats?.parameters ?? 0 },
     { name: 'Tech', count: stats?.technologies ?? 0 },
   ]
+
+  const jobStatusData = Object.entries(analytics?.job_status ?? {}).map(([name, value]) => ({
+    name: name.charAt(0).toUpperCase() + name.slice(1),
+    count: value,
+    fill: JOB_COLORS[name] ?? '#6b7280',
+  }))
+
+  const scopeData = analytics?.scope_coverage
+    ? [
+        { name: 'In Scope', value: analytics.scope_coverage.in_scope ?? 0, fill: '#22c55e' },
+        { name: 'Out of Scope', value: analytics.scope_coverage.out_of_scope ?? 0, fill: '#ef4444' },
+      ].filter(d => d.value > 0)
+    : []
+
+  const httpStatusData = Object.entries(analytics?.http_status_codes ?? {})
+    .map(([code, count]) => ({ code, count }))
+    .sort((a, b) => Number(a.code) - Number(b.code))
+
+  const funnelData = analytics?.recon_funnel ?? []
+  const timelineData = analytics?.discovery_timeline ?? []
+  const techData = analytics?.top_technologies ?? []
+
+  const toolsCategoryData = Object.entries(analytics?.tools_by_category ?? {}).map(([name, value]) => ({
+    name,
+    installed: value,
+  }))
 
   const installedTools = tools.filter(t => t.installed).length
   const totalTools = tools.length
@@ -101,8 +141,7 @@ export default function DashboardPage() {
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between flex-wrap gap-4">
         <div>
           <h1 className="text-2xl font-bold">Dashboard</h1>
           <p className="text-sm text-muted-foreground mt-1">
@@ -110,6 +149,17 @@ export default function DashboardPage() {
           </p>
         </div>
         <div className="flex items-center space-x-3">
+          {projects.length > 1 && (
+            <select
+              value={selectedProjectId ?? ''}
+              onChange={e => setSelectedProjectId(Number(e.target.value))}
+              className="bg-secondary border border-border rounded-md px-3 py-2 text-sm"
+            >
+              {projects.map(p => (
+                <option key={p.id} value={p.id}>{p.name}</option>
+              ))}
+            </select>
+          )}
           <button
             onClick={() => navigate('/recon')}
             className="flex items-center space-x-2 px-4 py-2 bg-blue-600 text-white rounded-md text-sm font-medium hover:bg-blue-700"
@@ -120,7 +170,6 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* Stats Grid */}
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
         {statCards.map(card => (
           <div key={card.key} className="bg-card border border-border rounded-lg p-4 hover:border-primary/30 transition-colors">
@@ -135,12 +184,23 @@ export default function DashboardPage() {
         ))}
       </div>
 
-      {/* Charts Row */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Asset Breakdown Bar Chart */}
+        <div className="bg-card border border-border rounded-lg p-6">
+          <h3 className="text-sm font-semibold mb-4">Recon Funnel</h3>
+          <ResponsiveContainer width="100%" height={240}>
+            <BarChart data={funnelData} layout="vertical" margin={{ top: 5, right: 20, left: 20, bottom: 5 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#334155" horizontal={false} />
+              <XAxis type="number" tick={{ fill: '#94a3b8', fontSize: 11 }} axisLine={false} tickLine={false} />
+              <YAxis type="category" dataKey="stage" tick={{ fill: '#94a3b8', fontSize: 11 }} axisLine={false} tickLine={false} width={90} />
+              <Tooltip content={<CustomTooltip />} />
+              <Bar dataKey="count" fill="#6366f1" radius={[0, 4, 4, 0]} maxBarSize={28} />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+
         <div className="bg-card border border-border rounded-lg p-6">
           <h3 className="text-sm font-semibold mb-4">Asset Distribution</h3>
-          <ResponsiveContainer width="100%" height={220}>
+          <ResponsiveContainer width="100%" height={240}>
             <BarChart data={assetBreakdown} margin={{ top: 5, right: 10, left: -10, bottom: 5 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
               <XAxis dataKey="name" tick={{ fill: '#94a3b8', fontSize: 11 }} axisLine={false} tickLine={false} />
@@ -150,8 +210,9 @@ export default function DashboardPage() {
             </BarChart>
           </ResponsiveContainer>
         </div>
+      </div>
 
-        {/* Severity Pie Chart */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="bg-card border border-border rounded-lg p-6">
           <h3 className="text-sm font-semibold mb-4">Finding Severity</h3>
           {severityData.length > 0 ? (
@@ -161,18 +222,17 @@ export default function DashboardPage() {
                   data={severityData}
                   cx="50%"
                   cy="50%"
-                  innerRadius={55}
-                  outerRadius={85}
+                  innerRadius={50}
+                  outerRadius={80}
                   paddingAngle={3}
                   dataKey="value"
-                  label={({ name, value }) => `${name}: ${value}`}
-                  labelLine={false}
                 >
                   {severityData.map((entry, i) => (
                     <Cell key={i} fill={entry.fill} />
                   ))}
                 </Pie>
                 <Tooltip content={<CustomTooltip />} />
+                <Legend wrapperStyle={{ fontSize: 11 }} />
               </PieChart>
             </ResponsiveContainer>
           ) : (
@@ -181,11 +241,137 @@ export default function DashboardPage() {
             </div>
           )}
         </div>
+
+        <div className="bg-card border border-border rounded-lg p-6">
+          <h3 className="text-sm font-semibold mb-4">Scope Coverage</h3>
+          {scopeData.length > 0 ? (
+            <ResponsiveContainer width="100%" height={220}>
+              <PieChart>
+                <Pie data={scopeData} cx="50%" cy="50%" innerRadius={50} outerRadius={80} paddingAngle={4} dataKey="value">
+                  {scopeData.map((entry, i) => (
+                    <Cell key={i} fill={entry.fill} />
+                  ))}
+                </Pie>
+                <Tooltip content={<CustomTooltip />} />
+                <Legend wrapperStyle={{ fontSize: 11 }} />
+              </PieChart>
+            </ResponsiveContainer>
+          ) : (
+            <div className="h-[220px] flex items-center justify-center text-muted-foreground text-sm">
+              No assets discovered yet.
+            </div>
+          )}
+        </div>
+
+        <div className="bg-card border border-border rounded-lg p-6">
+          <h3 className="text-sm font-semibold mb-4">Job Status</h3>
+          {jobStatusData.length > 0 ? (
+            <ResponsiveContainer width="100%" height={220}>
+              <BarChart data={jobStatusData} margin={{ top: 5, right: 10, left: -10, bottom: 5 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                <XAxis dataKey="name" tick={{ fill: '#94a3b8', fontSize: 10 }} axisLine={false} tickLine={false} />
+                <YAxis tick={{ fill: '#94a3b8', fontSize: 11 }} axisLine={false} tickLine={false} allowDecimals={false} />
+                <Tooltip content={<CustomTooltip />} />
+                <Bar dataKey="count" radius={[4, 4, 0, 0]} maxBarSize={36}>
+                  {jobStatusData.map((entry, i) => (
+                    <Cell key={i} fill={entry.fill} />
+                  ))}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          ) : (
+            <div className="h-[220px] flex items-center justify-center text-muted-foreground text-sm">
+              No pipeline jobs yet.
+            </div>
+          )}
+        </div>
       </div>
 
-      {/* Bottom Row: System Status + Quick Actions */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className="bg-card border border-border rounded-lg p-6">
+          <h3 className="text-sm font-semibold mb-4">Discovery Timeline</h3>
+          {timelineData.length > 0 ? (
+            <ResponsiveContainer width="100%" height={240}>
+              <AreaChart data={timelineData} margin={{ top: 5, right: 10, left: -10, bottom: 5 }}>
+                <defs>
+                  <linearGradient id="timelineGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.4} />
+                    <stop offset="95%" stopColor="#3b82f6" stopOpacity={0} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                <XAxis dataKey="date" tick={{ fill: '#94a3b8', fontSize: 10 }} axisLine={false} tickLine={false} />
+                <YAxis tick={{ fill: '#94a3b8', fontSize: 11 }} axisLine={false} tickLine={false} allowDecimals={false} />
+                <Tooltip content={<CustomTooltip />} />
+                <Area type="monotone" dataKey="count" stroke="#3b82f6" fill="url(#timelineGrad)" strokeWidth={2} />
+              </AreaChart>
+            </ResponsiveContainer>
+          ) : (
+            <div className="h-[240px] flex items-center justify-center text-muted-foreground text-sm">
+              Discovery activity will appear here after recon runs.
+            </div>
+          )}
+        </div>
+
+        <div className="bg-card border border-border rounded-lg p-6">
+          <h3 className="text-sm font-semibold mb-4">HTTP Status Codes</h3>
+          {httpStatusData.length > 0 ? (
+            <ResponsiveContainer width="100%" height={240}>
+              <BarChart data={httpStatusData} margin={{ top: 5, right: 10, left: -10, bottom: 5 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                <XAxis dataKey="code" tick={{ fill: '#94a3b8', fontSize: 11 }} axisLine={false} tickLine={false} />
+                <YAxis tick={{ fill: '#94a3b8', fontSize: 11 }} axisLine={false} tickLine={false} allowDecimals={false} />
+                <Tooltip content={<CustomTooltip />} />
+                <Bar dataKey="count" fill="#14b8a6" radius={[4, 4, 0, 0]} maxBarSize={40} />
+              </BarChart>
+            </ResponsiveContainer>
+          ) : (
+            <div className="h-[240px] flex items-center justify-center text-muted-foreground text-sm">
+              No live hosts probed yet.
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className="bg-card border border-border rounded-lg p-6">
+          <h3 className="text-sm font-semibold mb-4">Top Technologies</h3>
+          {techData.length > 0 ? (
+            <ResponsiveContainer width="100%" height={240}>
+              <BarChart data={techData} layout="vertical" margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#334155" horizontal={false} />
+                <XAxis type="number" tick={{ fill: '#94a3b8', fontSize: 11 }} axisLine={false} tickLine={false} allowDecimals={false} />
+                <YAxis type="category" dataKey="name" tick={{ fill: '#94a3b8', fontSize: 10 }} axisLine={false} tickLine={false} width={100} />
+                <Tooltip content={<CustomTooltip />} />
+                <Bar dataKey="count" fill="#a855f7" radius={[0, 4, 4, 0]} maxBarSize={24} />
+              </BarChart>
+            </ResponsiveContainer>
+          ) : (
+            <div className="h-[240px] flex items-center justify-center text-muted-foreground text-sm">
+              Technology fingerprints appear after HTTP probing.
+            </div>
+          )}
+        </div>
+
+        <div className="bg-card border border-border rounded-lg p-6">
+          <h3 className="text-sm font-semibold mb-4">Installed Tools by Category</h3>
+          {toolsCategoryData.length > 0 ? (
+            <ResponsiveContainer width="100%" height={240}>
+              <RadialBarChart cx="50%" cy="50%" innerRadius="20%" outerRadius="90%" data={toolsCategoryData} startAngle={180} endAngle={0}>
+                <RadialBar background dataKey="installed" fill="#3b82f6" cornerRadius={4} />
+                <Legend iconSize={10} wrapperStyle={{ fontSize: 11 }} />
+                <Tooltip content={<CustomTooltip />} />
+              </RadialBarChart>
+            </ResponsiveContainer>
+          ) : (
+            <div className="h-[240px] flex items-center justify-center text-muted-foreground text-sm">
+              {installedTools}/{totalTools} tools installed overall.
+            </div>
+          )}
+        </div>
+      </div>
+
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* System Status */}
         <div className="bg-card border border-border rounded-lg p-6">
           <h3 className="text-sm font-semibold mb-4">System Status</h3>
           <div className="space-y-3">
@@ -214,7 +400,6 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        {/* Quick Actions */}
         <div className="bg-card border border-border rounded-lg p-6 col-span-1 lg:col-span-2">
           <h3 className="text-sm font-semibold mb-4">Quick Actions</h3>
           <div className="grid grid-cols-2 gap-2">
@@ -245,7 +430,6 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* Projects List */}
       <div className="bg-card border border-border rounded-lg p-6">
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-sm font-semibold">All Projects</h3>
@@ -255,8 +439,11 @@ export default function DashboardPage() {
           {projects.map(project => (
             <div
               key={project.id}
-              onClick={() => navigate('/projects')}
-              className="flex items-center justify-between py-3 hover:bg-secondary/50 px-3 -mx-3 rounded-md transition-colors cursor-pointer"
+              onClick={() => setSelectedProjectId(project.id)}
+              className={cn(
+                'flex items-center justify-between py-3 hover:bg-secondary/50 px-3 -mx-3 rounded-md transition-colors cursor-pointer',
+                selectedProjectId === project.id && 'bg-secondary/40 border border-border'
+              )}
             >
               <div className="flex items-center space-x-3">
                 <Globe className="h-4 w-4 text-muted-foreground" />
