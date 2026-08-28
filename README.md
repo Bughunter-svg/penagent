@@ -330,7 +330,7 @@ ollama pull qwen2.5:latest
 ## API Reference
 
 ### Health & System
-- `GET /api/health` - Check backend service availability.
+- `GET /api/health` - Check baackend service availability.
 - `GET /api/tools/status` - Detect installed tools, paths, and binary versions.
 - `POST /api/tools/install` - Trigger tool installation via tool manager.
 
