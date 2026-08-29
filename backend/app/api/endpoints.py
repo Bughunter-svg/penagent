@@ -1,8 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
+from sqlalchemy.orm import selectinload
 from typing import List, Optional
-import json
+from collections import defaultdict
 
 from app.database import get_db
 from app.models import (
@@ -15,7 +16,7 @@ from app.schemas import (
     AssetResponse, AssetFilter, AssetStats,
     HostResponse, HostFilter,
     URLResponse, URLFilter,
-    FindingResponse, FindingCreate, FindingUpdate, FindingFilter,
+    FindingResponse, FindingCreate, FindingUpdate, FindingFilter, FindingStats, DashboardAnalytics,
     JobResponse, JobLogResponse, JobFilter,
     PipelineStartRequest, PipelineStatus, PipelineConfig,
     ToolStatusList, ToolConfigUpdate,
@@ -30,38 +31,9 @@ from app.config import get_settings
 
 router = APIRouter()
 
-# --- Projects ---
-@router.post("/projects", response_model=ProjectResponse)
-async def create_project(project: ProjectCreate, db: AsyncSession = Depends(get_db)):
-    db_project = Project(name=project.name, description=project.description)
-    db.add(db_project)
-    await db.commit()
-    await db.refresh(db_project)
-    
-    for t in project.targets:
-        db.add(Target(project_id=db_project.id, target=t))
-    for inc in project.scope_includes:
-        db.add(ScopeRule(project_id=db_project.id, rule_type="include", pattern=inc))
-    for exc in project.scope_excludes:
-        db.add(ScopeRule(project_id=db_project.id, rule_type="exclude", pattern=exc))
-    
-    await db.commit()
-    await db.refresh(db_project)
-    return db_project
 
-@router.get("/projects", response_model=List[ProjectResponse])
-async def list_projects(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Project))
-    return result.scalars().all()
-
-@router.get("/projects/{project_id}", response_model=ProjectResponse)
-async def get_project(project_id: int, db: AsyncSession = Depends(get_db)):
-    project = await db.get(Project, project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-        
-    # Get stats
-    stats = ProjectStats(
+async def _project_stats(db: AsyncSession, project_id: int) -> ProjectStats:
+    return ProjectStats(
         subdomains=(await db.execute(select(func.count(Asset.id)).where(Asset.project_id == project_id))).scalar() or 0,
         live_hosts=(await db.execute(select(func.count(Host.id)).where(Host.project_id == project_id))).scalar() or 0,
         urls=(await db.execute(select(func.count(URLModel.id)).where(URLModel.project_id == project_id))).scalar() or 0,
@@ -70,8 +42,11 @@ async def get_project(project_id: int, db: AsyncSession = Depends(get_db)):
         findings=(await db.execute(select(func.count(Finding.id)).where(Finding.project_id == project_id))).scalar() or 0,
         high_confidence=(await db.execute(select(func.count(Finding.id)).where(Finding.project_id == project_id, Finding.confidence == "high"))).scalar() or 0,
     )
-    
-    project_dict = {
+
+
+async def _project_response(db: AsyncSession, project: Project) -> dict:
+    stats = await _project_stats(db, project.id)
+    return {
         "id": project.id,
         "name": project.name,
         "description": project.description,
@@ -80,9 +55,146 @@ async def get_project(project_id: int, db: AsyncSession = Depends(get_db)):
         "updated_at": project.updated_at,
         "targets": [{"id": t.id, "project_id": t.project_id, "target": t.target, "target_type": t.target_type, "is_primary": t.is_primary, "created_at": t.created_at} for t in project.targets],
         "scope_rules": [{"id": r.id, "project_id": r.project_id, "rule_type": r.rule_type, "pattern": r.pattern, "created_at": r.created_at} for r in project.scope_rules],
-        "stats": stats
+        "stats": stats,
     }
-    return project_dict
+
+
+async def _load_project(db: AsyncSession, project_id: int) -> Optional[Project]:
+    result = await db.execute(
+        select(Project)
+        .where(Project.id == project_id)
+        .options(selectinload(Project.targets), selectinload(Project.scope_rules))
+    )
+    return result.scalar_one_or_none()
+
+
+@router.post("/projects", response_model=ProjectResponse)
+async def create_project(project: ProjectCreate, db: AsyncSession = Depends(get_db)):
+    db_project = Project(name=project.name, description=project.description)
+    db.add(db_project)
+    await db.flush()
+
+    for i, t in enumerate(project.targets):
+        db.add(Target(project_id=db_project.id, target=t, is_primary=(i == 0)))
+    for inc in project.scope_includes:
+        db.add(ScopeRule(project_id=db_project.id, rule_type="include", pattern=inc))
+    for exc in project.scope_excludes:
+        db.add(ScopeRule(project_id=db_project.id, rule_type="exclude", pattern=exc))
+
+    await db.flush()
+    loaded = await _load_project(db, db_project.id)
+    return await _project_response(db, loaded)
+
+
+@router.get("/projects", response_model=List[ProjectResponse])
+async def list_projects(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(Project).options(selectinload(Project.targets), selectinload(Project.scope_rules))
+    )
+    projects = result.scalars().all()
+    return [await _project_response(db, p) for p in projects]
+
+
+@router.get("/projects/{project_id}", response_model=ProjectResponse)
+async def get_project(project_id: int, db: AsyncSession = Depends(get_db)):
+    project = await _load_project(db, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return await _project_response(db, project)
+
+
+@router.get("/projects/{project_id}/analytics", response_model=DashboardAnalytics)
+async def get_project_analytics(project_id: int, db: AsyncSession = Depends(get_db)):
+    project = await db.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    stats = await _project_stats(db, project_id)
+
+    findings = (await db.execute(select(Finding).where(Finding.project_id == project_id))).scalars().all()
+    by_severity: dict[str, int] = defaultdict(int)
+    by_status: dict[str, int] = defaultdict(int)
+    by_confidence: dict[str, int] = defaultdict(int)
+    by_source: dict[str, int] = defaultdict(int)
+    for f in findings:
+        by_severity[f.severity] += 1
+        by_status[f.status] += 1
+        by_confidence[f.confidence] += 1
+        by_source[f.detection_source or "unknown"] += 1
+
+    jobs = (await db.execute(select(Job).where(Job.project_id == project_id))).scalars().all()
+    job_status: dict[str, int] = defaultdict(int)
+    for job in jobs:
+        job_status[job.status] += 1
+
+    hosts = (await db.execute(select(Host).where(Host.project_id == project_id))).scalars().all()
+    http_status_codes: dict[str, int] = defaultdict(int)
+    for host in hosts:
+        if host.status_code is not None:
+            http_status_codes[str(host.status_code)] += 1
+
+    tech_rows = (await db.execute(
+        select(Technology.name, func.count(Technology.id))
+        .where(Technology.project_id == project_id)
+        .group_by(Technology.name)
+        .order_by(func.count(Technology.id).desc())
+        .limit(8)
+    )).all()
+    top_technologies = [{"name": name, "count": count} for name, count in tech_rows]
+
+    total_assets = (await db.execute(select(func.count(Asset.id)).where(Asset.project_id == project_id))).scalar() or 0
+    in_scope_assets = (await db.execute(select(func.count(Asset.id)).where(Asset.project_id == project_id, Asset.in_scope == True))).scalar() or 0
+
+    recon_funnel = [
+        {"stage": "Subdomains", "count": stats.subdomains},
+        {"stage": "Live Hosts", "count": stats.live_hosts},
+        {"stage": "URLs", "count": stats.urls},
+        {"stage": "Parameters", "count": stats.parameters},
+        {"stage": "Findings", "count": stats.findings},
+    ]
+
+    assets = (await db.execute(select(Asset).where(Asset.project_id == project_id))).scalars().all()
+    timeline_map: dict[str, int] = defaultdict(int)
+    for asset in assets:
+        day = asset.created_at.strftime("%Y-%m-%d") if asset.created_at else "unknown"
+        timeline_map[day] += 1
+    for finding in findings:
+        day = finding.created_at.strftime("%Y-%m-%d") if finding.created_at else "unknown"
+        timeline_map[day] += 1
+    discovery_timeline = sorted(
+        [{"date": day, "count": count} for day, count in timeline_map.items()],
+        key=lambda x: x["date"],
+    )
+
+    tool_result = await db.execute(select(ToolConfig))
+    configs = {c.tool_name: c.custom_path for c in tool_result.scalars().all() if c.custom_path}
+    tool_status = await ToolDetector.detect_all(configs)
+    tools_by_category: dict[str, int] = defaultdict(int)
+    for tool in tool_status:
+        if tool.installed:
+            tools_by_category[tool.category] += 1
+
+    return DashboardAnalytics(
+        project_id=project_id,
+        stats=stats,
+        findings=FindingStats(
+            total=len(findings),
+            by_severity=dict(by_severity),
+            by_status=dict(by_status),
+            by_confidence=dict(by_confidence),
+            by_source=dict(by_source),
+        ),
+        job_status=dict(job_status),
+        http_status_codes=dict(http_status_codes),
+        top_technologies=top_technologies,
+        scope_coverage={
+            "in_scope": in_scope_assets,
+            "out_of_scope": total_assets - in_scope_assets,
+        },
+        recon_funnel=recon_funnel,
+        discovery_timeline=discovery_timeline,
+        tools_by_category=dict(tools_by_category),
+    )
 
 @router.delete("/projects/{project_id}")
 async def delete_project(project_id: int, db: AsyncSession = Depends(get_db)):

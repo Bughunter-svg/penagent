@@ -293,6 +293,19 @@ class FindingStats(BaseModel):
     by_source: dict[str, int] = {}
 
 
+class DashboardAnalytics(BaseModel):
+    project_id: int
+    stats: ProjectStats
+    findings: FindingStats
+    job_status: dict[str, int] = {}
+    http_status_codes: dict[str, int] = {}
+    top_technologies: list[dict[str, int | str]] = []
+    scope_coverage: dict[str, int] = {}
+    recon_funnel: list[dict[str, str | int]] = []
+    discovery_timeline: list[dict[str, str | int]] = []
+    tools_by_category: dict[str, int] = {}
+
+
 # ── Job ──────────────────────────────────────────────────────────────────────
 class JobResponse(BaseModel):
     id: int
